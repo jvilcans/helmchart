@@ -1,0 +1,803 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: {{ template "CGW.fullname" . }}
+  labels:
+    app: {{ template "CGW.name" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+spec:
+  strategy:
+    type: Recreate
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ template "CGW.name" . }}
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ template "CGW.name" . }}
+        release: {{ .Release.Name }}
+        {{- if .Values.vxlanController.enabled }}
+        {{ .Values.vxlanController.metadataKey }}: "true"
+        {{- end }}
+      annotations:
+        {{- if .Values.vxlanController.enabled }}
+        {{ .Values.vxlanController.annotationKey }}: "{{ .Values.vxlanController.names }}"
+        {{- end }}
+        checksum/strongswan-config-template: {{ include (print $.Template.BasePath "/strongswan-config.yaml") . | sha256sum }}
+        checksum/strongswan-secret-template: {{ include (print $.Template.BasePath "/strongswan-secret.yaml") . | sha256sum }}
+        checksum/bird-config-template: {{ include (print $.Template.BasePath "/bird-config.yaml") . | sha256sum }}
+        checksum/iptables-config-template: {{ include (print $.Template.BasePath "/iptables-configmap.yaml") . | sha256sum }}
+        checksum/ip-init-config-template: {{ include (print $.Template.BasePath "/init-script-config.yaml") . | sha256sum }}
+        checksum/ip-init-env-template: {{ include (print $.Template.BasePath "/init-script-env.yaml") . | sha256sum }}
+        checksum/ping-exporter-config-template: {{ include (print $.Template.BasePath "/ping-exporter-configmap.yaml") . | sha256sum }}
+        checksum/vrrp-config-template: {{ include (print $.Template.BasePath "/vrrp-configmap.yaml") . | sha256sum }}
+        checksum/radvd-config-template: {{ include (print $.Template.BasePath "/radvd-config.yaml") . | sha256sum }}
+        checksum/strongswan-config: {{ toYaml .Values.ipsec.strongswan | sha256sum }}
+        checksum/bird-config: {{ toYaml .Values.bird.configuration | sha256sum }}
+        checksum/iptables-ipv4-config: {{ toYaml .Values.iptables.ipv4Rules | sha256sum }}
+        checksum/iptables-ipv6-config: {{ toYaml .Values.iptables.ipv6Rules | sha256sum }}
+        {{- if .Values.additionalAnnotations }}
+{{ toYaml .Values.additionalAnnotations | indent 8 }}
+        {{- end }}
+    spec:
+      terminationGracePeriodSeconds: 15
+        {{- if .Values.affinity }}
+      affinity:
+{{ toYaml .Values.affinity | indent 8 }}
+        {{- end }}
+      initContainers:
+      {{- if .Values.vxlanController.enabled }}
+      - name: vxlan-controller-agent-init
+        image: {{ .Values.vxlanController.image.repository }}:{{ .Values.vxlanController.image.tag }}
+        imagePullPolicy: {{ .Values.vxlanController.image.pullPolicy  | quote }}
+        resources:
+{{ toYaml .Values.resources.vxlanControllerAgentInit | indent 10 }}
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+      {{- end }}
+      {{- if .Values.ipsec.enabled }}
+      {{- if not .Values.ipsec.manualConfig }}
+      - name: init-ip
+        image: {{ .Values.networkUtility.image.repository }}:{{ .Values.networkUtility.image.tag }}
+        imagePullPolicy: {{ .Values.networkUtility.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.initIp | indent 10 }}
+        volumeMounts:
+        - name: podshare
+          mountPath: /mnt/podshare
+        command:
+        - bash
+        - -c
+        - |
+          # create dummy interface for ping endpoint
+          if [ -n "$LOCAL_PING_ENDPOINT" ]; then
+              ip link add dum0 type dummy
+              ip addr add $LOCAL_PING_ENDPOINT/32 dev dum0
+              ip link set dum0 up
+          fi
+          #
+          # create dummy interface for ping endpoint
+          if [ -n "$BGP_ROUTER_ID" ]; then
+              ip link add dum1 type dummy
+              ip addr add $BGP_ROUTER_ID/32 dev dum1
+              ip link set dum1 up
+          fi
+          echo "Initializer completed."
+        env:
+        - name: LOCAL_PING_ENDPOINT
+          value: "{{ .Values.ipsec.local_ping_endpoint }}"
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+      {{- end }}
+      {{- if and .Values.ipsec.vti_key (not .Values.ipsec.manualConfig) }}
+      - name: init-vti
+        image: "{{ .Values.ipsec.image.repository }}:{{ .Values.ipsec.image.tag }}"
+        imagePullPolicy: {{ .Values.ipsec.image.pullPolicy | quote }}
+        command: ["/usr/local/bin/start-strongswan.sh", "init"]
+        resources:
+{{ toYaml .Values.resources.initVti | indent 10 }}
+        env:
+        - name: IPSEC_VTI_KEY
+          value: "{{ .Values.ipsec.vti_key }}"
+#        - name: IPSEC_LOCALIP
+#          value: "{{ .Values.ipsec.localip }}"
+        - name: IPSEC_VTI_STATICROUTES
+          value: "{{ .Values.ipsec.vti_staticroutes }}"
+        - name: IPSEC_LOCALIP
+          value: "{{ .Values.ipsec.localip }}"
+        - name: IPSEC_LOCALNET
+          value: "{{ .Values.ipsec.localnet }}"
+        - name: IPSEC_REMOTEIP
+          value: "{{ .Values.ipsec.remoteip }}"
+        - name: IPSEC_REMOTENET
+          value: "{{ .Values.ipsec.remotenet }}"
+        - name: IPSEC_PSK
+          value: "{{ .Values.ipsec.psk }}"
+        volumeMounts:
+        - mountPath: /lib/modules
+          name: host-kernel-modules-volume
+        securityContext:
+          privileged: true
+      {{- end }}
+      {{- end }}
+
+      {{ if .Values.gre.enabled }}
+      ##  GRE Tunneling ##
+      - name: init-gre
+        image: {{ .Values.networkUtility.image.repository }}:{{ .Values.networkUtility.image.tag }}
+        imagePullPolicy: {{ .Values.networkUtility.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.initGre | indent 10 }}
+        command:
+        - sh
+        - -c
+        - |
+          # create GRE endpoint
+          if [ -n "$GRE_LOCALIP" -a -n "$GRE_REMOTEIP" -a -n "$GRE_IFACE" ]; then
+            ip link add dum-"$GRE_IFACE" type dummy
+            ip addr add $GRE_LOCALIP/32 dev dum-"$GRE_IFACE"
+            ip link set dum-"$GRE_IFACE" up
+            {{- if .Values.gre.gretap }}
+            ip link add "$GRE_IFACE" type gretap remote "$GRE_REMOTEIP" local "$GRE_LOCALIP" ttl 255
+            {{- else }}
+            ip tunnel add "$GRE_IFACE" mode gre remote "$GRE_REMOTEIP" local "$GRE_LOCALIP" ttl 255
+            {{- end }}
+            ip link set "$GRE_IFACE" up 
+          else
+            echo "set gre.localip, gre.remoteip and gre.name in your configuration"
+            exit 1
+          fi
+          exit 0
+
+        env:
+        - name: GRE_LOCALIP
+          value: "{{ .Values.gre.localip }}"
+        - name: GRE_REMOTEIP
+          value: "{{ .Values.gre.remoteip }}"
+        - name: GRE_IFACE
+          value: "{{ .Values.gre.name }}"
+        imagePullPolicy: {{ .Values.networkUtility.image.pullPolicy | quote }}
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+      {{ end }}
+       
+      {{- if .Values.ipSetup.enabled }}
+      {{- if or .Values.ipSetup.ip .Values.ipSetup.staticRoutes }}
+      - name: ip-setup
+        image: {{ .Values.networkUtility.image.repository }}:{{ .Values.networkUtility.image.tag }}
+        imagePullPolicy: {{ .Values.networkUtility.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.ipSetup | indent 10 }}
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+        command:
+        - sh
+        - -c
+        - |
+          set -ex
+            sleep 5
+          {{- range $element := .Values.ipSetup.ip }}
+            {{- if eq $element.type "bridge" }}
+            brctl addbr {{ $element.interface }}
+            {{- range $bind := $element.bind }}
+            brctl addif {{ $element.interface }} {{ $bind }}
+            ip link set {{ $element.interface }} up
+            {{- end }}
+            {{- end }}
+          {{- end }}
+          {{- range $element := .Values.ipSetup.ip }}
+            {{- if eq $element.type "ip" }}
+            ip addr add {{ $element.addr }} dev {{ $element.interface }}
+            {{- end }}
+            {{- if eq $element.type "interface" }}
+              {{- if eq $element.action "up" }}
+              ip link set {{ $element.interface }} up
+              {{- else if eq $element.action "down" }}
+              ip link set {{ $element.interface }} down
+              {{- end }}
+            {{- end }}
+          {{- end }}
+          {{- range $element := .Values.ipSetup.staticRoutes }}
+            ip route add {{ $element }}
+
+          {{- end }}
+      {{- end }}
+      {{- end }}
+
+      {{- if .Values.vxlanController.enabled }}
+      {{- if or .Values.vxlanController.ip .Values.vxlanController.staticRoutes }}
+      - name: vxlan-controller-ip-setup
+        image: {{ .Values.networkUtility.image.repository }}:{{ .Values.networkUtility.image.tag }}
+        imagePullPolicy: {{ .Values.networkUtility.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.vxlanControllerIpSetup | indent 10 }}
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+        command:
+        - sh
+        - -c
+        - |
+          set -ex
+            sleep 5
+          {{- range $element := .Values.vxlanController.ip }}
+            {{- if eq $element.type "bridge" }}
+            brctl addbr {{ $element.interface }}
+            {{- range $bind := $element.bind }}
+            brctl addif {{ $element.interface }} {{ $bind }}
+            ip link set {{ $element.interface }} up
+            {{- end }}
+            {{- end }}
+          {{- end }}
+          {{- range $element := .Values.vxlanController.ip }}
+            {{- if eq $element.type "ip" }}
+            ip addr add {{ $element.addr }} dev {{ $element.interface }}
+            {{- end }}
+            {{- if eq $element.type "interface" }}
+              {{- if eq $element.action "up" }}
+              ip link set {{ $element.interface }} up
+              {{- else if eq $element.action "down" }}
+              ip link set {{ $element.interface }} down
+              {{- end }}
+            {{- end }}
+          {{- end }}
+          {{- range $element := .Values.vxlanController.staticRoutes }}
+            ip route add {{ $element }}
+
+          {{- end }}
+      {{- end }}
+      {{- end }}
+
+
+      {{- if .Values.initScript.enabled }}
+      - name: init-script
+        image: {{ .Values.initScript.image.repository }}:{{ .Values.initScript.image.tag }}
+        imagePullPolicy: {{ .Values.initScript.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.initScript | indent 10 }}
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+          {{- if .Values.initScript.additionalSecurityContext }}
+{{ toYaml .Values.initScript.additionalSecurityContext | indent 10 }}
+          {{- end }}
+        envFrom:
+          - configMapRef:
+              name: {{ template "CGW.fullname" . }}-init-script-env
+        command:
+        - sh
+        - /opt/initScript/initScript.sh
+        volumeMounts:
+        - name: init-script
+          mountPath: /opt/initScript/
+          readOnly: true
+      {{- end }}
+
+      {{- if .Values.iptables.enabled }}
+      - name: iptables
+        image: {{ .Values.iptables.image.repository }}:{{ .Values.iptables.image.tag }}
+        imagePullPolicy: {{ .Values.iptables.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.iptables | indent 10 }}
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+        command:
+        - sh
+        - -c
+        - |
+          set -ex
+          iptables-restore < /etc/iptables/iptables.rules
+          ip6tables-restore < /etc/iptables/ip6tables.rules
+        volumeMounts:
+        - name: iptables-rules
+          mountPath: /etc/iptables/
+          readOnly: true
+      {{- end }}
+
+      containers:
+      {{- if .Values.debug.enabled }}
+      - name: debug
+        image: {{ .Values.debug.image.repository }}:{{ .Values.debug.image.tag }}
+        imagePullPolicy: {{ .Values.debug.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.debug | indent 10 }}
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+        command:
+        - sh
+        - -c
+        - "trap : TERM INT; (while true; do sleep 1000; done) & wait"
+      {{- end }}
+
+      {{- if .Values.ipsec.enabled }}
+      - name: ipsec
+        image: "{{ .Values.ipsec.image.repository }}:{{ .Values.ipsec.image.tag }}"
+        imagePullPolicy: {{ .Values.ipsec.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.ipsec | indent 10 }}
+        ports:
+        - containerPort: 500
+          name: u500
+          protocol: UDP
+        - containerPort: 4500
+          name: u4500
+          protocol: UDP
+        env:
+        {{- if not .Values.ipsec.manualConfig }}
+          - name: USE_ENV_CONFIG
+            value: "{{ .Values.ipsec.useEnvConfig }}"
+          - name: SET_ROUTE_DEFAULT_TABLE
+            value: "{{ .Values.ipsec.setRouteDefaultTable }}"
+          - name: IPSEC_LOCALPRIVIP
+            value: "{{ .Values.ipsec.localprivip }}"
+  #        - name: IPSEC_LOCALPUBIP
+  #          value: "{{ .Values.ipsec.localpubip }}"
+          - name: IPSEC_LOCALIP
+            value: "{{ .Values.ipsec.localip }}"
+          - name: IPSEC_LOCALID
+            value: "{{ .Values.ipsec.localid }}"
+          - name: IPSEC_LOCALNET
+            value: "{{ .Values.ipsec.localnet }}"
+          - name: IPSEC_REMOTEIP
+            value: "{{ .Values.ipsec.remoteip }}"
+          - name: IPSEC_REMOTEID
+            value: "{{ .Values.ipsec.remoteid }}"
+          - name: IPSEC_REMOTENET
+            value: "{{ .Values.ipsec.remotenet }}"
+          - name: IPSEC_PSK
+            value: "{{ .Values.ipsec.psk }}"
+          - name: IPSEC_KEYEXCHANGE
+            value: "{{ .Values.ipsec.keyexchange }}"
+          - name: IPSEC_IKECIPHER
+            value: "{{ .Values.ipsec.ikecipher }}"
+          - name: IPSEC_ESPCIPHER
+            value: "{{ .Values.ipsec.espcipher }}"
+          - name: IPSEC_FORCEUDP
+            value: "{{ .Values.ipsec.forceudp }}"
+          - name: IPSEC_IKEREAUTH
+            value: "{{ .Values.ipsec.ikereauth }}"
+          {{- if .Values.ipsec.lifetime }}
+          - name: IPSEC_LIFETIME
+            value: "{{ .Values.ipsec.lifetime }}"
+          {{- end}}
+          {{- if .Values.ipsec.ikelifetime }}
+          - name: IPSEC_IKELIFETIME
+            value: "{{ .Values.ipsec.ikelifetime }}"
+          {{- end}}
+        {{- else }}
+          - name: IPSEC_USE_MANUAL_CONFIG
+            value: "True"
+        {{- end }}
+          {{- if .Values.ipsec.interfaces }}
+          - name: IPSEC_INTERFACES
+            value: "{{ .Values.ipsec.interfaces }}"
+          {{- end }}
+          {{- if .Values.ipsec.vti_key }}
+          - name: IPSEC_VTI_KEY
+            value: "{{ .Values.ipsec.vti_key }}"
+          {{- end }}
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /lib/modules
+          name: host-kernel-modules-volume
+          readOnly: true
+        {{- if .Values.ipsec.manualConfig }}
+        - name: strongswan-ipsec-config
+          mountPath: /etc/ipsec.config.d/
+          readOnly: true
+        - name: strongswan-ipsec-secrets
+          mountPath: /etc/ipsec.secrets.d/
+          readOnly: true
+        {{- end }}
+        {{- if .Values.ipsec.certBasedIPSEC }}
+        {{- if or .Values.ipsec.certs.privateKeys .Values.ipsec.certs.externalPrivateKeys }}
+        - name: strongswan-ipsec-privatekeys
+          mountPath: /etc/ipsec.d/private/
+          readOnly: true
+        {{- end }}
+        {{- if or .Values.ipsec.certs.certificates .Values.ipsec.certs.externalCertificates }}
+        - name: strongswan-ipsec-certs
+          mountPath: /etc/ipsec.d/certs/
+          readOnly: true
+        {{- end }}
+        {{- if or .Values.ipsec.certs.caCertificates .Values.ipsec.certs.externalCaCertificates }}
+        - name: strongswan-ipsec-cacerts
+          mountPath: /etc/ipsec.d/cacerts/
+          readOnly: true
+        {{- end }}
+        {{- if or .Values.ipsec.certs.certificateRevocationLists .Values.ipsec.certs.externalCertificateRevocationLists }}
+        - name: strongswan-ipsec-crls
+          mountPath: /etc/ipsec/crls/
+          readOnly: true
+        {{- end }}
+        {{- end }}
+        {{- end }}
+
+      {{- if .Values.pingExporter.enabled }}
+      - name: ping-exporter
+        image: {{ .Values.pingExporter.image.repository }}:{{ .Values.pingExporter.image.tag }}
+        imagePullPolicy: {{ .Values.pingExporter.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.pingExporter | indent 10 }}
+        env:
+        - name: PINGEXPORTER_PING_TARGET
+          value: "{{ .Values.ipsec.remote_ping_endpoint }}"
+        - name: PINGEXPORTER_PING_SOURCE_IPV4
+          value: "{{ .Values.ipsec.local_ping_endpoint }}"
+        ports:
+        - containerPort: 9427
+          protocol: TCP
+        volumeMounts:
+          - name: ping-exporter-config
+            mountPath: /etc/ping-exporter
+      {{- end }}
+
+      {{- if .Values.pingProber.enabled }}
+      - name: ping-prober
+        image: {{ .Values.pingProber.image.repository }}:{{ .Values.pingProber.image.tag }}
+        imagePullPolicy: {{ .Values.pingProber.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.pingProber | indent 10 }}
+        command:
+        - sh
+        - -c
+        - |
+          if [ -z "$REMOTE_PING_ENDPOINT" -o -z "$LOCAL_PING_ENDPOINT" ]; then
+            echo "REMOTE_PING_ENDPOINT or LOCAL_PING_ENDPOINT is not set. No probing. Sleeping."
+            while sleep 3600; do echo "keep sleeping"; done
+            exit 1
+          fi
+          echo "Starting ping probes."
+          while sleep 5; do
+            printf "\n\n# ping start - " ; date -Is
+            ping -I ${LOCAL_PING_ENDPOINT} -c 3 -w 10 ${REMOTE_PING_ENDPOINT} | tee /mnt/podshare/current-ping.log
+            # make it atomic:
+            mv /mnt/podshare/current-ping.log /mnt/podshare/last-ping.log
+          done
+
+        volumeMounts:
+        - name: podshare
+          mountPath: /mnt/podshare
+        env:
+        - name: REMOTE_PING_ENDPOINT
+          value: "{{ .Values.ipsec.remote_ping_endpoint }}"
+        - name: LOCAL_PING_ENDPOINT
+          value: "{{ .Values.ipsec.local_ping_endpoint }}"
+      {{- end }}
+      ## VXLAN Connection ##
+      {{- if .Values.vxlan.enabled }}
+      {{- range $index, $element := .Values.vxlan.connectors }}
+      - name: vxlan-connector-{{ $element.name }}
+        image: {{ $.Values.vxlan.image.repository }}:{{ $.Values.vxlan.image.tag }}
+        imagePullPolicy: {{ $.Values.vxlan.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.vxlan | indent 10 }}
+        securityContext:
+          capabilities:
+            add:
+              - NET_ADMIN
+        env:
+        - name: PEER
+          value: "{{ $element.peer }}"
+        {{- if $element.bridge }}
+        - name: BRIDGE
+          value: "{{ $element.bridge }}"
+        {{- end }}
+        - name: BRIDGED_IFACES
+          value: "{{ $element.bridged_ifaces }}"
+        {{- if $element.bridge_name }}
+        - name: BRIDGE_IFNAME
+          value: "{{ $element.bride_name }}"
+        {{- end }}
+        - name: VXLANID
+          value: "{{ $element.id }}"
+        {{- if $element.ipaddr }}
+        - name: IP_ADDR
+          value: "{{ $element.ipaddr }}"
+        {{- end }}
+        {{- if eq $index 0 }}
+        ports:
+        - name: port-vxlan
+          containerPort: 4789
+          protocol: UDP
+        {{- end }}
+      {{- end }}
+      {{- end }}
+
+      {{- if .Values.bird.enabled }}
+      - name: bird
+        image: {{ .Values.bird.image.repository }}:{{ .Values.bird.image.tag }}
+        imagePullPolicy: {{ .Values.bird.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.bird | indent 10 }}
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - SYS_ADMIN
+            - SETPCAP
+            - NET_RAW
+        volumeMounts:
+        - name: bird-config
+          mountPath: /opt/bird/
+        - name: bird-socket
+          mountPath: /var/run/bird/
+      {{- end }}
+
+      {{- if and .Values.bird.enabled .Values.bird.birdExporter.enabled }}
+      - name: bird-exporter
+        image: {{ .Values.bird.birdExporter.image.repository }}:{{ .Values.bird.birdExporter.image.tag }}
+        imagePullPolicy: {{ .Values.bird.birdExporter.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.birdExporter | indent 10 }}
+        args:
+          - '-format.new=true'
+          {{- if .Values.bird.configuration.bird }}
+          - '-bird.socket=/var/run/bird/bird.ctl'
+          {{- else }}
+          - '-bird.ipv4=false'
+          {{- end }}
+          {{- if .Values.bird.configuration.bird6 }}
+          - '-bird.socket6=/var/run/bird/bird6.ctl'
+          {{- else }}
+          - '-bird.ipv6=false'
+          {{- end }}
+        ports:
+        - name: p9324
+          containerPort: 9324
+          protocol: TCP
+        volumeMounts:
+        - name: bird-socket
+          mountPath: /var/run/bird/
+      {{- end }}
+      {{ if .Values.vrrp.enabled }}
+      ## VRRP ##
+      - name: vrrp
+        image: {{ .Values.networkUtility.image.repository }}:{{ .Values.networkUtility.image.tag }}
+        imagePullPolicy: {{ .Values.networkUtility.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.vrrp | indent 10 }}
+        command:
+        - /usr/sbin/keepalived
+        - --use-file=/etc/keepalived/keepalived.conf
+        - --vrrp
+        - -Dl
+        - -n
+        securityContext:
+          capabilities:
+            add:
+              - NET_ADMIN
+              - SYS_MODULE
+        volumeMounts:
+        - name: {{ template "CGW.fullname" . }}-vrrp
+          mountPath: /etc/keepalived/
+      {{ end }}
+      {{- if .Values.vxlanController.enabled }}
+      - name: vxlan-controller-agent
+        image: {{ .Values.vxlanController.image.repository }}:{{ .Values.vxlanController.image.tag }}
+        imagePullPolicy: {{ .Values.vxlanController.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.vxlanControllerAgent | indent 10 }}
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+      {{- end }}
+      {{- if .Values.radvd.enabled }}
+      ## Router Advertisement Daemon
+      - name: radvd
+        image: {{ .Values.radvd.image.repository }}:{{ .Values.radvd.image.tag }}
+        imagePullPolicy: {{ .Values.radvd.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.radvd | indent 10 }}
+        securityContext:
+          capabilities:
+            add:
+            - NET_RAW
+        args:
+          - '-d'
+          - '2'
+          - '-m'
+          - 'stderr'
+        volumeMounts:
+        - name: radvd-config
+          mountPath: /etc/radvd/
+      {{- end }}
+      {{- if .Values.pcap.enabled }}
+      ## PCAP
+      - name: pcap
+        image: {{ .Values.pcap.image.repository }}:{{ .Values.pcap.image.tag }}
+        imagePullPolicy: {{ .Values.pcap.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.pcap | indent 10 }}
+        securityContext:
+          capabilities:
+            add:
+            - NET_RAW
+        envFrom:
+          - configMapRef:
+              name: {{ template "CGW.fullname" . }}-pcap-env
+        volumeMounts:
+        - name: pcap-data
+          mountPath: /data/
+      {{- end }}
+      {{- if .Values.rclone.enabled }}
+      ## Rclone ##
+      - name: rclone
+        image: {{ .Values.rclone.image.repository }}:{{ .Values.rclone.image.tag }}
+        volumeMounts:
+        - name: pcap-data
+          mountPath: /data/
+        {{- if .Values.rclone.useSSHkeyFile }}
+        - name: rclone-secrets
+          mountPath: /etc/ssh
+          readOnly: true
+        {{- end }}
+        imagePullPolicy: {{ .Values.rclone.image.pullPolicy | quote }}
+        resources:
+{{ toYaml .Values.resources.rclone | indent 10 }}
+        securityContext:
+        capabilities:
+          add:
+          - NET_ADMIN
+        envFrom:
+          - configMapRef:
+              name: {{ template "CGW.fullname" . }}-rclone-env
+        command:
+        - sh
+        - -c
+        - |
+           mkdir data/finished
+           watchnames=''
+           [ -d /data/ ] && watchnames="$watchnames /data/"
+           inotifywait --monitor -e close_write --format %w%f $watchnames | while read FILE
+           do
+            echo "$FILE is finished. Moving to data/finished/. Attempting to push to $RCLONE_REMOTE_PATH/ on remote device."
+            timestamp=$(echo $FILE | cut -d '_' -f3 | cut -d '.' -f1 |  sed 's/./&_/4;s/./&_/7;s/./&-/10;s/./&h/13;s/./&m/16;s/./&s/19')
+            mv $FILE data/finished/$timestamp-{{ .Values.rclone.filename }}
+            rclone move /data/finished/ $RCLONE_REMOTE_NAME:$RCLONE_REMOTE_PATH/
+           done
+      {{- end }}
+      volumes:
+      - name: host-kernel-modules-volume
+        hostPath:
+          path: /lib/modules
+      - name: podshare
+        emptyDir: {}
+      {{- if .Values.pingExporter.enabled }}
+      - name: ping-exporter-config
+        configMap:
+          name: {{ template "CGW.fullname" . }}-ping-exporter
+      {{- end }}
+      {{- if .Values.iptables.enabled }}
+      - name: iptables-rules
+        configMap:
+          name: {{ template "CGW.fullname" . }}-iptables
+          items:
+          - key: iptables.rules
+            path: iptables.rules
+          - key: ip6tables.rules
+            path: ip6tables.rules
+      {{- end }}
+      {{- if .Values.ipsec.enabled }}
+      ##### IPSEC volumes
+      {{- if .Values.ipsec.manualConfig }}
+      ##### IPSEC manual config and secrets
+      - name: strongswan-ipsec-config
+        configMap:
+          name: {{ template "CGW.fullname" . }}-strongswan-config
+      - name: strongswan-ipsec-secrets
+        secret:
+          secretName: {{ template "CGW.fullname" . }}-strongswan-secrets
+      {{- end }}
+      ##### IPSEC Certificates et. al.
+      {{- if .Values.ipsec.certBasedIPSEC }}
+      {{- if or .Values.ipsec.certs.privateKeys .Values.ipsec.certs.externalPrivateKeys }}
+      - name: strongswan-ipsec-privatekeys
+        secret:
+          {{- if .Values.ipsec.certs.externalPrivateKeys }}
+          secretName: {{ .Values.ipsec.certs.externalPrivateKeys }}
+          {{- else }}
+          secretName: {{ template "CGW.fullname" . }}-strongswan-privatekeys
+          {{- end }}
+      {{- end }}
+      {{- if or .Values.ipsec.certs.certificates .Values.ipsec.certs.externalCertificates }}
+      - name: strongswan-ipsec-certs
+        secret:
+          {{- if .Values.ipsec.certs.externalCertificates }}
+          secretName: {{ .Values.ipsec.certs.externalCertificates }}
+          {{- else }}
+          secretName: {{ template "CGW.fullname" . }}-strongswan-certs
+          {{- end }}
+      {{- end }}
+      {{- if or .Values.ipsec.certs.caCertificates .Values.ipsec.certs.externalCaCertificates }}
+      - name: strongswan-ipsec-cacerts
+        secret:
+          {{- if .Values.ipsec.certs.externalCaCertificates }}
+          secretName: {{ .Values.ipsec.certs.externalCaCertificates }}
+          {{- else }}
+          secretName: {{ template "CGW.fullname" . }}-strongswan-cacerts
+          {{- end }}
+      {{- end }}
+      {{- if or .Values.ipsec.certs.certificateRevocationLists .Values.ipsec.certs.externalCertificateRevocationLists }}
+      - name: strongswan-ipsec-crls
+        secret:
+          {{- if .Values.ipsec.certs.externalCertificateRevocationLists }}
+          secretName: {{ .Values.ipsec.certs.externalCertificateRevocationLists }}
+          {{- else }}
+          secretName: {{ template "CGW.fullname" . }}-strongswan-crls
+          {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- if .Values.rclone.useSSHkeyFile }}
+      - name: rclone-secrets
+        secret:
+          secretName: rclone-ssh-key
+      {{- end }}
+
+
+
+      {{- if .Values.initScript.enabled }}
+      - name: init-script
+        configMap:
+          name: {{ template "CGW.fullname" . }}-init-script
+          defaultMode: 0544
+          items:
+            - key: initScript.sh
+              path: initScript.sh
+      {{- end }}
+      {{- if .Values.bird.enabled }}
+      - name: bird-config
+        configMap:
+          name: {{ template "CGW.fullname" . }}-bird-config
+      - name: bird-socket
+        emptyDir:
+          medium: Memory
+      {{- end }}
+      {{- if .Values.vrrp.enabled }}
+      - name: {{ template "CGW.fullname" . }}-vrrp
+        configMap:
+          name: {{ template "CGW.fullname" . }}-vrrp
+      {{- end }}
+      {{- if .Values.pcap.enabled }}
+      - name: pcap-data
+        emptyDir:
+          sizeLimit: 2Gi
+      {{- end }}
+      {{- if .Values.radvd.enabled }}
+      - name: radvd-config
+        configMap:
+          name: {{ template "CGW.fullname" . }}-radvd-config
+          defaultMode: 0444
+          items:
+            - key: radvd.conf
+              path: radvd.conf
+      {{- end }}
+    {{- if .Values.pullSecrets }}
+      imagePullSecrets:
+{{ toYaml .Values.pullSecrets | indent 8 }}
+    {{- end }}
+
+   {{- if .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml .Values.nodeSelector | indent 8 }}
+   {{- end }}
+
+   {{- if .Values.tolerations }}
+      tolerations:
+{{ toYaml .Values.tolerations | indent 8 }}
+   {{- end }}
+
+

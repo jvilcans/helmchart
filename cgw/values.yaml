@@ -1,0 +1,354 @@
+---
+resources:
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  initGre:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  initVti:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  ipsec:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 200m
+      memory: 128Mi
+  cgwExporter:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  pingProber:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  vrrp:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  vxlanControllerAgent:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  vxlanControllerIpSetup:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  ipSetup:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  vxlanControllerAgentInit:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  iptables:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  debug:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  initScript:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  bird:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  birdExporter:
+    limits:
+      cpu: 50m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  pcap:
+    limits:
+      cpu: 50m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+  radvd:
+    limits:
+      cpu: 50m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  initIp:
+    limits:
+      cpu: 50m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  pingExporter:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 32Mi
+  rclone:
+    limits:
+      cpu: 50m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+replicaCount: 1
+
+ipsec:
+  enabled: false
+  useEnvConfig: "HIDDEN_PUBIP_HOST"
+  setRouteDefaultTable: false
+  remoteip: 192.0.2.0
+  remotenet: 192.168.23.0/24
+  localprivip: "%any"
+  # localpubip: ipsec.openvnf.com
+  localnet: 192.168.24.0/24
+  keyexchange: ikev2
+  ikecipher: aes192gcm16-aes128gcm16-prfsha256-ecp256-ecp521,aes192-sha256-modp3072
+  espcipher: aes192gcm16-aes128gcm16-ecp256,aes192-sha256-modp3072
+  psk: secret
+  forceudp: "yes"
+  vti_key: 1304
+  manualConfig: true
+  certs: {}
+  service:
+    enabled: false
+    name: ipsec
+    type: ClusterIP
+  image:
+    repository: quay.io/openvnf/vnf-ipsec
+    tag: v1.4.0
+    pullPolicy: IfNotPresent
+
+#pullSecrets:
+  #- name: werft
+
+
+## Values used to set up GRE usage
+gre:
+  enabled: false
+  localip: 192.0.2.1
+  remoteip: 203.0.113.0
+  name: gre9
+  gretap: false
+
+bird:
+  enabled: false
+  image:
+    repository: quay.io/openvnf/vnf-bird
+    tag: v1.1.0_2019-05-28T125241Z
+    pullPolicy: IfNotPresent
+
+  birdExporter:
+    enabled: true
+    service:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9324"
+    image:
+      repository: quay.io/openvnf/bird_exporter
+      tag: 1.2.3_bugfix1
+      pullPolicy: IfNotPresent
+
+initScript:
+  enabled: false
+  env: {}
+  image:
+    repository: quay.io/travelping/nettools
+    tag: v1.10.0
+    pullPolicy: IfNotPresent
+  script: |
+    echo "script configuration is missing"
+
+networkUtility:
+  image:
+    repository: quay.io/travelping/nettools
+    tag: v1.10.0
+    pullPolicy: IfNotPresent
+
+iptables:
+  enabled: false
+  image:
+    repository: quay.io/travelping/nettools
+    tag: v1.10.0
+    pullPolicy: IfNotPresent
+  ipv4Rules: ""
+    #*filter
+
+    ## Block all traffic silently as default policy
+    #-P INPUT DROP
+    #-P FORWARD DROP
+    #-P OUTPUT DROP
+
+    ## Allows all loopback (lo0) traffic and drop all traffic to 127/8 that doesn't use lo0
+    #-A INPUT -i lo0 -j ACCEPT
+    #-A INPUT ! -i lo0 -d 127.0.0.0/8 -j REJECT
+
+    #COMMIT
+  ipv6Rules: ""
+    #*filter
+
+    ## Block all traffic silently as default policy
+    #-P INPUT DROP
+    #-P FORWARD DROP
+    #-P OUTPUT DROP
+
+    ## Allows all loopback (lo0) traffic and drop all traffic to ::1 that doesn't use lo0
+    #-A INPUT -i lo0 -j ACCEPT
+    #-A INPUT ! -i lo0 -d ::1 -j REJECT
+
+    #COMMIT
+
+debug:
+  enabled: true
+  image:
+    repository: quay.io/travelping/nettools
+    tag: v1.10.0
+    pullPolicy: IfNotPresent
+
+pingProber:
+  enabled: false
+  image:
+    repository: quay.io/travelping/nettools
+    tag: v1.10.0
+    pullPolicy: IfNotPresent
+
+pingExporter:
+  enabled: false
+  image:
+    repository: quay.io/travelping/ping-exporter
+    tag: v0.6.0
+    pullPolicy: IfNotPresent
+  service:
+    annotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: "9427"
+  config:
+    web:
+      listen-address: ":9427"
+      telemetry-path: "/metrics"
+    dns:
+      refresh: 1m
+
+vxlan:
+  enabled: false
+  image:
+    repository: travelping/vxlan-connector
+    tag: 1.0.0
+    pullPolicy: IfNotPresent
+
+  connectors:
+    - name: default
+      peer: 192.0.2.2
+      bridge: true
+      bridged_ifaces: dum0815
+      bridge_name: br0
+      id: 100
+  service:
+    enabled: false
+    type: ClusterIP
+
+vxlanController:
+  enabled: false
+  annotationKey: vxlan.openvnf.org/networks
+  metadataKey: vxlan.openvnf.org
+  names: "vxeth0, vxeth1"
+  image:
+    repository: quay.io/openvnf/kube-vxlan-controller-agent
+    tag: v2.1.0
+    pullPolicy: IfNotPresent
+  # ip:
+  # - interface: vxeth1
+  #   addr: "192.0.2.1/24"
+  #   type: ip
+  # - interface: bridge0
+  #   type: bridge
+  #   bind:
+  #   - gre9
+  #   - vxeth0
+
+ipSetup:
+  enabled: false
+
+vrrp:
+  enabled: false
+  instances: {}
+
+pcap:
+  enabled: false
+  image:
+    repository: quay.io/travelping/pcap
+    tag: v1.2.1
+    pullPolicy: IfNotPresent
+
+radvd:
+  enabled: false
+  image:
+    repository: quay.io/openvnf/radvd
+    tag: v0.1.1
+    pullPolicy: IfNotPresent
+
+rclone:
+  enabled: false
+  filename: "gtp.pcap"
+  useSSHkeyFile: false
+  image:
+    repository: quay.io/travelping/docker-rclone
+    tag: v1.0
+    pullPolicy: IfNotPresent
+  env:
+    RCLONE_REMOTE_NAME: "sftp"
+    RCLONE_REMOTE_PATH: "data"

@@ -1,0 +1,30 @@
+{{- if and .Values.ipsec.enabled .Values.ipsec.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ template "CGW.fullname" . }}-ipsec
+  labels:
+    app: {{ template "CGW.name" . }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+{{- if .Values.ipsec.service.annotations }}
+  annotations:
+{{ toYaml .Values.ipsec.service.annotations | indent 4 }}
+{{- end }}
+spec:
+  {{ if not .Values.ipsec.service.externalIPs }}type: {{ .Values.ipsec.service.type }}{{ end }}
+  {{ if .Values.ipsec.service.externalIPs }}externalIPs: {{ .Values.ipsec.service.externalIPs }}{{ end }}
+  ports:
+    - port: 500
+      targetPort: 500
+      protocol: UDP
+      name: p500
+    - port: 4500
+      targetPort: 4500
+      protocol: UDP
+      name: p4500
+  selector:
+    app: {{ template "CGW.name" . }}
+    release: {{ .Release.Name }}
+{{- end }}
